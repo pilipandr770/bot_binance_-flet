@@ -1,0 +1,6 @@
+Flask>=2.0
+python-binance>=1.0.16
+python-dotenv>=0.21.0
+# Optional / dev
+pytest>=7.0
+# Pin versions if needed for deployment
