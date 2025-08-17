@@ -646,7 +646,7 @@ class AssetSwitcher:
             
             # Используем строковое представление для точного соответствия требованиям Binance
             qty_str = '{:.{}f}'.format(qty, precision)
-            log(f"📤 ОТПРАВКА ОРДЕРА НА ПРОДАЖУ: {qty_str} {self.base_asset} (форматировано с точностью {precision})", "ORDER")
+            log(f"📤 ОТПРАВКА ОРДЕРА НА ПРОДАЖУ: {qty_str} {self.base_asset} (одной транзакцией)", "ORDER")
             
             order = self.client.order_market_sell(symbol=self.symbol, quantity=qty_str)
             
@@ -688,55 +688,41 @@ class AssetSwitcher:
             log(f"❌ Нет подключения к Binance API", "ERROR")
             return False
         
-        # Рассчитываем количество с учетом комиссий
+        # Рассчитываем сумму USDT с учетом комиссий
         usdt_to_spend = usdt_amount * 0.999  # 99.9% для учета комиссий
-        qty = round_step(usdt_to_spend / current_price, step)
         
-        # Определяем точность
-        precision = 0
-        step_str = str(step)
-        if '.' in step_str:
-            precision = len(step_str.split('.')[-1])
+        # Округляем до 2 знаков после запятой для USDT
+        usdt_to_spend = round(usdt_to_spend, 2)
             
-        log(f"🔢 РАСЧЕТ ПОКУПКИ: USDT={usdt_amount:.2f}, К трате={usdt_to_spend:.2f}, Цена={current_price:.4f}, Количество={qty} (step={step}, precision={precision})", "CALC")
+        log(f"🔢 РАСЧЕТ ПОКУПКИ: USDT={usdt_amount:.2f}, К трате={usdt_to_spend:.2f}, Цена={current_price:.4f}", "CALC")
         
-        if qty <= 0 or usdt_to_spend < 10:  # минимум $10
+        if usdt_to_spend < 10:  # минимум $10
             log(f"❌ Сумма для покупки слишком мала: {usdt_to_spend:.2f} USDT (минимум $10)", "WARN")
             return False
         
         try:
-            # Используем строковое представление для точного соответствия требованиям Binance
-            qty_str = '{:.{}f}'.format(qty, precision)
+            # Используем quoteOrderQty - точную сумму USDT для покупки
+            usdt_str = '{:.2f}'.format(usdt_to_spend)
             
-            log(f"📤 ОТПРАВКА ОРДЕРА НА ПОКУПКУ: {qty_str} {self.base_asset} за {usdt_to_spend:.2f} USDT", "ORDER")
-            order = self.client.order_market_buy(symbol=self.symbol, quantity=qty_str)
+            log(f"📤 ОТПРАВКА ОРДЕРА НА ПОКУПКУ: {self.base_asset} за {usdt_str} USDT (одной транзакцией)", "ORDER")
+            order = self.client.order_market_buy(
+                symbol=self.symbol, 
+                quoteOrderQty=usdt_str  # Указываем точную сумму USDT
+            )
             
             # Подробная информация об ордере
             if 'fills' in order and order['fills']:
                 total_cost = sum(float(fill['price']) * float(fill['qty']) for fill in order['fills'])
-                avg_price = total_cost / float(order['executedQty']) if float(order['executedQty']) > 0 else 0
-                log(f"✅ ПОКУПКА ВЫПОЛНЕНА: {order['executedQty']} {self.base_asset} за {total_cost:.2f} USDT (средняя цена: {avg_price:.4f})", "TRADE")
+                qty = float(order['executedQty'])
+                avg_price = total_cost / qty if qty > 0 else 0
+                log(f"✅ ПОКУПКА ВЫПОЛНЕНА: {qty} {self.base_asset} за {total_cost:.2f} USDT (средняя цена: {avg_price:.4f})", "TRADE")
             else:
-                log(f"✅ ПОКУПКА ВЫПОЛНЕНА: {usdt_to_spend:.2f} USDT -> {qty_str} {self.base_asset}", "TRADE")
+                log(f"✅ ПОКУПКА ВЫПОЛНЕНА: {usdt_str} USDT -> {self.base_asset}", "TRADE")
             
             self.last_switch_time = time.time()
             return True
         except BinanceAPIException as e:
             log(f"❌ ОШИБКА ПОКУПКИ: {e}", "ERROR")
-            # Пробуем с меньшей точностью при ошибке о большой точности
-            if "слишком большую точность" in str(e) and precision > 0:
-                try:
-                    # Пробуем с меньшей точностью
-                    new_precision = max(0, precision - 1)
-                    qty_str = '{:.{}f}'.format(qty, new_precision)
-                    log(f"🔄 ПОВТОРНАЯ ПОПЫТКА с меньшей точностью {new_precision}: {qty_str}", "RETRY")
-                    
-                    order = self.client.order_market_buy(symbol=self.symbol, quantity=qty_str)
-                    log(f"✅ ПОКУПКА ВЫПОЛНЕНА со второй попытки: {qty_str} {self.base_asset}", "TRADE")
-                    self.last_switch_time = time.time()
-                    return True
-                except Exception as retry_e:
-                    log(f"❌ ОШИБКА при повторной попытке: {retry_e}", "ERROR")
             return False
         except Exception as e:
             log(f"❌ ОШИБКА ПОКУПКИ: {e}", "ERROR")
