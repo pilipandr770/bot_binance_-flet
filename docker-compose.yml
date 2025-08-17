@@ -6,7 +6,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./app:/app
-      - ./state.json:/app/state.json
     env_file:
       - .env
     ports:
