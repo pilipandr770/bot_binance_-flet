@@ -565,8 +565,10 @@ class AssetSwitcher:
         # Инициализируем время последнего переключения текущим временем.
         # Ранее использовалось 0, что приводило к очень большим значениям
         # (time_since_last = current_time - 0 =~ seconds since epoch) в логах.
-        self.last_switch_time = time.time()
-        self.min_switch_interval = 10  # минимум 10 секунд между переключениями
+    self.last_switch_time = time.time()
+    self.min_switch_interval = 60  # минимум 60 секунд между переключениями
+    self.last_signal = None
+    self.order_sent = False
         self.trading_mode_controller = trading_mode_controller
     
     def should_hold_base(self, ma_short: float, ma_long: float) -> bool:
@@ -594,29 +596,33 @@ class AssetSwitcher:
         """Нужно ли переключать актив"""
         current_time = time.time()
         time_since_last = current_time - self.last_switch_time
-        
         log(f"🔍 ПРОВЕРКА ПЕРЕКЛЮЧЕНИЯ: current='{current_asset}', should='{should_hold}', time_since_last={time_since_last:.1f}s", "DEBUG")
-        
         # Проверяем кулдаун
         if time_since_last < self.min_switch_interval:
             log(f"🔍 КУЛДАУН АКТИВЕН: {time_since_last:.1f}s < {self.min_switch_interval}s", "DEBUG")
             return False
-        
+        # Проверяем флаг отправленного ордера
+        if self.order_sent and self.last_signal == should_hold:
+            log(f"🔒 ОРДЕР УЖЕ ОТПРАВЛЕН ПО ЭТОМУ СИГНАЛУ: {should_hold}", "DEBUG")
+            return False
         assets_different = current_asset != should_hold
         log(f"🔍 АКТИВЫ РАЗНЫЕ: {assets_different}", "DEBUG")
-        
         return assets_different
     
     def execute_switch(self, from_asset: str, to_asset: str, balance: float, current_price: float, step: float) -> bool:
         """Выполнить переключение актива"""
         try:
+            result = False
             if from_asset == self.base_asset and to_asset == self.quote_asset:
                 # Продаем коин за USDT
-                return self._sell_base_for_usdt(balance, step)
+                result = self._sell_base_for_usdt(balance, step)
             elif from_asset == self.quote_asset and to_asset == self.base_asset:
                 # Покупаем коин за USDT
-                return self._buy_base_with_usdt(balance, current_price, step)
-            return False
+                result = self._buy_base_with_usdt(balance, current_price, step)
+            if result:
+                self.order_sent = True
+                self.last_signal = to_asset
+            return result
         except Exception as e:
             log(f"Ошибка переключения {from_asset} -> {to_asset}: {e}", "ERROR")
             return False
@@ -1113,6 +1119,9 @@ def trading_loop():
                         should_hold_base = analysis["should_hold_base"]
                         should_hold_asset = asset_switcher.base_asset if should_hold_base else asset_switcher.quote_asset
                         market_state = analysis["market_state"]
+                        # Сброс флага order_sent если сигнал изменился
+                        if asset_switcher.last_signal != should_hold_asset:
+                            asset_switcher.order_sent = False
                         
                         # Подробный лог индикаторов
                         log(f"📈 ИНДИКАТОРЫ: 30m сигнал={analysis['30m']['signal']}, 1h RSI={analysis['1h']['rsi']:.1f}, ATR={analysis['1h']['atr_percent']:.2f}%, 4h тренд={analysis['4h']['trend']}", "INDICATORS")
