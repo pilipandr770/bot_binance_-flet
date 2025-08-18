@@ -744,7 +744,7 @@ env_config.log_configuration_status()
 API_KEY = env_config.api_key
 API_SECRET = env_config.api_secret
 SYMBOL = env_config.symbol
-INTERVAL = env_config.interval
+INTERVAL = "30m"
 MA_SHORT = env_config.ma_short
 MA_LONG = env_config.ma_long
 CHECK_INTERVAL = env_config.check_interval
