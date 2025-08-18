@@ -569,7 +569,7 @@ class AssetSwitcher:
     self.min_switch_interval = 60  # минимум 60 секунд между переключениями
     self.last_signal = None
     self.order_sent = False
-        self.trading_mode_controller = trading_mode_controller
+    self.trading_mode_controller = trading_mode_controller
     
     def should_hold_base(self, ma_short: float, ma_long: float) -> bool:
         """Определить, должны ли мы держать базовый актив (коин)"""
