@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Копирование кода приложения
 COPY app/ ./
+# Копирование .env файла не требуется, он будет смонтирован через docker-compose.yml
 
 # Определение переменной среды для уведомления Python о том, что мы в продакшн
 ENV PYTHONUNBUFFERED=1
