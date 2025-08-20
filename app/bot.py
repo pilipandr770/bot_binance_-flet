@@ -1066,11 +1066,11 @@ def trading_loop():
                 log("📊 Получение данных для мульти-таймфреймового анализа...", "DATA")
                 try:
                     data_multi_tf = {
-                        "30m": get_klines_data(SYMBOL, "30m", 100),
+                        "30m": get_klines_data(SYMBOL, "30m", 100),  # Для обратной совместимости
                         "1h": get_klines_data(SYMBOL, "1h", 100),
                         "4h": get_klines_data(SYMBOL, "4h", 100)
                     }
-                    log(f"📊 Получено данных по таймфреймам: 30m ({len(data_multi_tf['30m']['close'])}), 1h ({len(data_multi_tf['1h']['close'])}), 4h ({len(data_multi_tf['4h']['close'])})", "DATA")
+                    log(f"📊 Получено данных по таймфреймам: 1h ({len(data_multi_tf['1h']['close'])}) - основной, 4h ({len(data_multi_tf['4h']['close'])}) - тренд и волатильность", "DATA")
                 except Exception as e:
                     log(f"⚠️ Ошибка получения мульти-таймфреймовых данных: {e}", "ERROR")
             
@@ -1124,7 +1124,7 @@ def trading_loop():
                             asset_switcher.order_sent = False
                         
                         # Подробный лог индикаторов
-                        log(f"📈 ИНДИКАТОРЫ: 30m сигнал={analysis['30m']['signal']}, 1h RSI={analysis['1h']['rsi']:.1f}, ATR={analysis['1h']['atr_percent']:.2f}%, 4h тренд={analysis['4h']['trend']}", "INDICATORS")
+                        log(f"📈 ИНДИКАТОРЫ: 1h сигнал={analysis['1h']['signal']}, 4h RSI={analysis['4h']['rsi']:.1f}, ATR={analysis['4h']['atr_percent']:.2f}%, 4h тренд={analysis['4h']['trend']}", "INDICATORS")
                         log(f"🎯 РЕШЕНИЕ: {market_state} → Должны держать {should_hold_asset}", "STRATEGY")
                         
                         # Сохраняем значения индикаторов в статусе бота

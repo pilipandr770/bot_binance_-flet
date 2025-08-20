@@ -46,9 +46,9 @@ class IndicatorBasedStrategy:
         Проанализировать данные и вернуть сигналы для принятия решений
         
         Args:
-            data_30m: Dict с данными свечей 30м (OHLC)
-            data_1h: Dict с данными свечей 1ч (OHLC)
-            data_4h: Dict с данными свечей 4ч (OHLC)
+            data_30m: Dict с данными свечей 30м (устаревшее, но сохранено для совместимости)
+            data_1h: Dict с данными свечей 1ч (OHLC) - основной таймфрейм для торговли
+            data_4h: Dict с данными свечей 4ч (OHLC) - для определения тренда и волатильности
         
         Returns:
             Dict с результатами анализа и сигналами
@@ -58,25 +58,25 @@ class IndicatorBasedStrategy:
         df_1h = self._prepare_dataframe(data_1h)
         df_4h = self._prepare_dataframe(data_4h)
         
-        # === 30m индикаторы ===
-        df_30m['ma7'] = df_30m['close'].rolling(7).mean()
-        df_30m['ma25'] = df_30m['close'].rolling(25).mean()
+        # === 1h индикаторы (основной таймфрейм для торговли) ===
+        df_1h['ma7'] = df_1h['close'].rolling(7).mean()
+        df_1h['ma25'] = df_1h['close'].rolling(25).mean()
         
-        signal_30m = "none"
-        if df_30m['ma7'].iloc[-1] > df_30m['ma25'].iloc[-1]:
-            signal_30m = "long"
-        elif df_30m['ma7'].iloc[-1] < df_30m['ma25'].iloc[-1]:
-            signal_30m = "short"
+        signal_1h = "none"
+        if df_1h['ma7'].iloc[-1] > df_1h['ma25'].iloc[-1]:
+            signal_1h = "long"
+        elif df_1h['ma7'].iloc[-1] < df_1h['ma25'].iloc[-1]:
+            signal_1h = "short"
 
-        # === 1h индикаторы ===
-        rsi_1h = calculate_rsi(df_1h).iloc[-1]
-        atr_1h = calculate_atr(df_1h).iloc[-1]
-        price_1h = df_1h['close'].iloc[-1]
+        # === 4h индикаторы для анализа волатильности и силы тренда ===
+        rsi_4h = calculate_rsi(df_4h).iloc[-1]
+        atr_4h = calculate_atr(df_4h).iloc[-1]
+        price_4h = df_4h['close'].iloc[-1]
         
         # Рассчитываем ATR в процентах от цены
-        atr_percent = atr_1h / price_1h * 100
+        atr_percent = atr_4h / price_4h * 100
 
-        # === 4h индикаторы ===
+        # === 4h индикаторы для определения тренда ===
         df_4h['ma7'] = df_4h['close'].rolling(7).mean()
         df_4h['ma25'] = df_4h['close'].rolling(25).mean()
         
@@ -89,25 +89,24 @@ class IndicatorBasedStrategy:
         elif ma7_4h < ma25_4h:
             trend_4h = "short"
         
-        # Определяем состояние рынка
-        market_state = self._determine_market_state(atr_percent, rsi_1h, trend_4h, signal_30m)
+        # Определяем состояние рынка на основе 1ч торгового таймфрейма и 4ч анализа тренда
+        market_state = self._determine_market_state(atr_percent, rsi_4h, trend_4h, signal_1h)
         
         return {
-            "30m": {
-                "ma7": df_30m['ma7'].iloc[-1],
-                "ma25": df_30m['ma25'].iloc[-1],
-                "signal": signal_30m
-            },
             "1h": {
-                "rsi": rsi_1h,
-                "atr": atr_1h,
-                "atr_percent": atr_percent,
-                "price": price_1h
+                "ma7": df_1h['ma7'].iloc[-1],
+                "ma25": df_1h['ma25'].iloc[-1],
+                "signal": signal_1h,
+                "price": df_1h['close'].iloc[-1]
             },
             "4h": {
                 "ma7": ma7_4h,
                 "ma25": ma25_4h,
-                "trend": trend_4h
+                "trend": trend_4h,
+                "rsi": rsi_4h,
+                "atr": atr_4h,
+                "atr_percent": atr_percent,
+                "price": price_4h
             },
             "market_state": market_state,
             "should_hold_base": market_state == "buy",
@@ -124,7 +123,7 @@ class IndicatorBasedStrategy:
             'volume': data.get('volume', [0] * len(data.get('close', [])))
         })
     
-    def _determine_market_state(self, atr_percent: float, rsi: float, trend_4h: str, signal_30m: str) -> str:
+    def _determine_market_state(self, atr_percent: float, rsi: float, trend_4h: str, signal_1h: str) -> str:
         """
         Определить состояние рынка на основе индикаторов
         
@@ -135,14 +134,14 @@ class IndicatorBasedStrategy:
             "no_trade" - нет четкого сигнала
         """
         # 1. Флет (бот отключен)
-        if atr_percent < 0.5 and (45 <= rsi <= 55) and trend_4h == "sideways":
+        if atr_percent < 0.4 and (45 <= rsi <= 55) and trend_4h == "sideways":
             return "flet"
 
         # 2. Выход из флета = обратные условия
-        if atr_percent >= 0.5 and (rsi > 55 or rsi < 45) and trend_4h != "sideways":
-            if signal_30m == "long" and trend_4h == "long":
+        if atr_percent >= 0.4 and (rsi > 55 or rsi < 45) and trend_4h != "sideways":
+            if signal_1h == "long" and trend_4h == "long":
                 return "buy"
-            elif signal_30m == "short" and trend_4h == "short":
+            elif signal_1h == "short" and trend_4h == "short":
                 return "sell"
 
         return "no_trade"

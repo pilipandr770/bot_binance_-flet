@@ -14,7 +14,7 @@ services:
       - key: SYMBOL
         value: BTCUSDT
       - key: INTERVAL
-        value: 15m
+        value: 1h
       - key: STRATEGY_TYPE
         value: MA_RSI_ATR
       - key: USE_MULTI_TIMEFRAME
