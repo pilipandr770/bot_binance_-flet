@@ -41,6 +41,17 @@ class IndicatorBasedStrategy:
         self.base_asset = symbol[:-4] if symbol.endswith("USDT") else symbol.split("USDT")[0]
         self.quote_asset = "USDT"
         
+    def bollinger_bands_signal(self, df: pd.DataFrame, window: int = 20, n_std: float = 2.0) -> bool:
+        """Проверить, находится ли цена в нижней части канала BB (close < middle)"""
+        bb_middle = df['close'].rolling(window).mean()
+        bb_std = df['close'].rolling(window).std()
+        bb_lower = bb_middle - n_std * bb_std
+        close = df['close'].iloc[-1]
+        middle = bb_middle.iloc[-1]
+        lower = bb_lower.iloc[-1]
+        # Сигнал: close < middle и близко к нижней границе (например, не выше middle на 50%)
+        return close < middle and (close - lower) / (middle - lower + 1e-8) < 0.5
+
     def analyze(self, data_30m, data_1h, data_4h) -> Dict[str, Any]:
         """
         Проанализировать данные и вернуть сигналы для принятия решений
@@ -58,6 +69,9 @@ class IndicatorBasedStrategy:
         df_1h = self._prepare_dataframe(data_1h)
         df_4h = self._prepare_dataframe(data_4h)
         
+        # === Bollinger Bands на 30m ===
+        bb_entry = self.bollinger_bands_signal(df_30m)
+
         # === 1h индикаторы (основной таймфрейм для торговли) ===
         df_1h['ma7'] = df_1h['close'].rolling(7).mean()
         df_1h['ma25'] = df_1h['close'].rolling(25).mean()
@@ -107,6 +121,10 @@ class IndicatorBasedStrategy:
                 "atr": atr_4h,
                 "atr_percent": atr_percent,
                 "price": price_4h
+            },
+            "30m": {
+                "bb_entry": bb_entry,
+                "close": df_30m['close'].iloc[-1]
             },
             "market_state": market_state,
             "should_hold_base": market_state == "buy",

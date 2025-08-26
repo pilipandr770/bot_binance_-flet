@@ -67,35 +67,38 @@ class EnvironmentConfig:
         log("=" * 60, "CONFIG")
         
         # Загружаем переменные из .env файла
-        # Определяем путь к .env файлу относительно текущего файла
         current_dir = os.path.dirname(os.path.abspath(__file__))
         env_file_path = os.path.join(current_dir, '.env')
-        
         log(f"🔍 Поиск .env файла: {env_file_path}", "CONFIG")
         if os.path.exists(env_file_path):
             log("✅ .env файл найден, загружаем...", "CONFIG")
             load_dotenv(env_file_path)
         else:
             log("⚠️ .env файл не найден, используем системные переменные", "CONFIG")
-            load_dotenv()  # Попытка загрузить из текущей директории
-        
-        # Загружаем все переменные с логированием
+            load_dotenv()
+
+        # === Основные торговые параметры ===
         self.api_key = self._get_env_with_logging("BINANCE_API_KEY", "").strip() or None
         self.api_secret = self._get_env_with_logging("BINANCE_API_SECRET", "").strip() or None
         self.symbol = self._get_env_with_logging("SYMBOL", "BNBUSDT", str.upper)
-        self.interval = self._get_env_with_logging("INTERVAL", "30m")
+        # Временные интервалы
+        self.interval = self._get_env_with_logging("INTERVAL", "1h")  # для SIMPLE_MA
+        self.entry_interval = self._get_env_with_logging("ENTRY_INTERVAL", "30m")
+        self.main_interval = self._get_env_with_logging("MAIN_INTERVAL", "1h")
+        self.trend_interval = self._get_env_with_logging("TREND_INTERVAL", "4h")
+        # Параметры MA
         self.ma_short = self._get_env_with_logging("MA_SHORT", "7", int)
         self.ma_long = self._get_env_with_logging("MA_LONG", "25", int)
-        # Тестовый режим удален в пользу работы напрямую с биржей
-        
-        # Остальные параметры
+
+        # === Прочие настройки ===
         self.check_interval = self._get_env_with_logging("CHECK_INTERVAL", "60", int)
         self.state_path = self._get_env_with_logging("STATE_PATH", "state.json")
         self.ma_spread_bps = self._get_env_with_logging("MA_SPREAD_BPS", "0.5", float)
         self.max_retries = self._get_env_with_logging("MAX_RETRIES", "3", int)
         self.health_check_interval = self._get_env_with_logging("HEALTH_CHECK_INTERVAL", "300", int)
         self.min_balance_usdt = self._get_env_with_logging("MIN_BALANCE_USDT", "10.0", float)
-        # Staking related
+
+        # === Staking настройки ===
         self.enable_staking = self._get_env_with_logging("ENABLE_STAKING", "false").lower() == "true"
         self.stake_percent = self._get_env_with_logging("STAKE_PERCENT", "0.8", float)
         self.stake_mode = self._get_env_with_logging("STAKE_MODE", "flexible")
@@ -446,7 +449,7 @@ class StakingManager:
             if isinstance(res, dict):
                 return {"success": True, "result": res}
             elif isinstance(res, str):
-                # Если API вернул строку вместо объекта, создаем стандартизированный ответ
+                # Если API вернуло строку вместо объекта, создаем стандартизированный ответ
                 log(f"STAKING: API вернуло строку вместо объекта: {res}", "WARN")
                 return {"success": True, "result": {"message": res}, "amount": amount}
             else:
@@ -475,7 +478,7 @@ class StakingManager:
             if isinstance(res, dict):
                 return {"success": True, "result": res}
             elif isinstance(res, str):
-                # Если API вернул строку вместо объекта, создаем стандартизированный ответ
+                # Если API вернуло строку вместо объекта, создаем стандартизированный ответ
                 log(f"STAKING: API вернуло строку вместо объекта: {res}", "WARN")
                 return {"success": True, "result": {"message": res}, "amount": amount}
             else:
@@ -627,112 +630,106 @@ class AssetSwitcher:
             log(f"Ошибка переключения {from_asset} -> {to_asset}: {e}", "ERROR")
             return False
     
-    def _sell_base_for_usdt(self, base_qty: float, step: float) -> bool:
-        """Продать весь базовый актив за USDT"""
-        
+    def _sell_base_for_usdt(self, base_qty: float, step: float, limit_interval: str = '1m', timeout: int = 30) -> bool:
+        """Продать весь базовый актив за USDT лимитным ордером"""
         if not self.client:
             log(f"❌ Нет подключения к Binance API", "ERROR")
             return False
-        
-        # Округляем количество согласно требованиям биржи
-        qty = round_step(base_qty * 0.999, step)  # 99.9% для учета комиссий
-        
+        qty = round_step(base_qty * 0.999, step)
         log(f"🔢 РАСЧЕТ ПРОДАЖИ: Исходное количество={base_qty:.6f}, После округления={qty} (step={step})", "CALC")
-        
         if qty <= 0:
             log(f"❌ Количество для продажи слишком мало: {qty}", "WARN")
             return False
-        
         try:
-            # Преобразуем количество в строку с подходящей точностью
             precision = 0
             step_str = str(step)
             if '.' in step_str:
                 precision = len(step_str.split('.')[-1])
-            
-            # Используем строковое представление для точного соответствия требованиям Binance
             qty_str = '{:.{}f}'.format(qty, precision)
-            log(f"📤 ОТПРАВКА ОРДЕРА НА ПРОДАЖУ: {qty_str} {self.base_asset} (одной транзакцией)", "ORDER")
-            
-            order = self.client.order_market_sell(symbol=self.symbol, quantity=qty_str)
-            
-            # Подробная информация об ордере
-            if 'fills' in order and order['fills']:
-                total_usdt = sum(float(fill['price']) * float(fill['qty']) for fill in order['fills'])
-                avg_price = total_usdt / float(order['executedQty']) if float(order['executedQty']) > 0 else 0
-                log(f"✅ ПРОДАЖА ВЫПОЛНЕНА: {order['executedQty']} {self.base_asset} за {total_usdt:.2f} USDT (средняя цена: {avg_price:.4f})", "TRADE")
-            else:
-                log(f"✅ ПРОДАЖА ВЫПОЛНЕНА: {qty_str} {self.base_asset} -> USDT", "TRADE")
-            
-            self.last_switch_time = time.time()
-            return True
-        except BinanceAPIException as e:
-            log(f"❌ ОШИБКА ПРОДАЖИ: {e}", "ERROR")
-            # Пробуем с меньшей точностью при ошибке о большой точности
-            if "слишком большую точность" in str(e) and precision > 0:
-                try:
-                    # Пробуем с меньшей точностью
-                    new_precision = max(0, precision - 1)
-                    qty_str = '{:.{}f}'.format(qty, new_precision)
-                    log(f"🔄 ПОВТОРНАЯ ПОПЫТКА с меньшей точностью {new_precision}: {qty_str}", "RETRY")
-                    
-                    order = self.client.order_market_sell(symbol=self.symbol, quantity=qty_str)
-                    log(f"✅ ПРОДАЖА ВЫПОЛНЕНА со второй попытки: {qty_str} {self.base_asset} -> USDT", "TRADE")
+            price = self.get_limit_price(interval=limit_interval)
+            price_str = '{:.2f}'.format(price)
+            log(f"📤 ОТПРАВКА ЛИМИТНОГО ОРДЕРА НА ПРОДАЖУ: {qty_str} {self.base_asset} по цене {price_str}", "ORDER")
+            order = self.client.order_limit_sell(
+                symbol=self.symbol,
+                quantity=qty_str,
+                price=price_str,
+                timeInForce='FOK'  # Исполнить полностью или отменить
+            )
+            order_id = order['orderId']
+            start_time = time.time()
+            while True:
+                status = self.client.get_order(symbol=self.symbol, orderId=order_id)
+                if status['status'] == 'FILLED':
+                    log(f"✅ ПРОДАЖА ВЫПОЛНЕНА: {qty_str} {self.base_asset} по цене {price_str}", "TRADE")
                     self.last_switch_time = time.time()
                     return True
-                except Exception as retry_e:
-                    log(f"❌ ОШИБКА при повторной попытке: {retry_e}", "ERROR")
-            return False
+                if time.time() - start_time > timeout:
+                    self.client.cancel_order(symbol=self.symbol, orderId=order_id)
+                    log(f"❌ ОРДЕР НЕ ИСПОЛНЕН ЗА {timeout} сек, отменен", "WARN")
+                    return False
+                time.sleep(2)
         except Exception as e:
-            log(f"❌ ОШИБКА ПРОДАЖИ: {e}", "ERROR")
+            log(f"❌ ОШИБКА ПРОДАЖИ (лимит): {e}", "ERROR")
             return False
     
-    def _buy_base_with_usdt(self, usdt_amount: float, current_price: float, step: float) -> bool:
-        """Купить базовый актив за весь USDT"""
-        
+    def _buy_base_with_usdt(self, usdt_amount: float, current_price: float, step: float, limit_interval: str = '1m', timeout: int = 30) -> bool:
+        """Купить базовый актив за весь USDT лимитным ордером"""
         if not self.client:
             log(f"❌ Нет подключения к Binance API", "ERROR")
             return False
-        
-        # Рассчитываем сумму USDT с учетом комиссий
-        usdt_to_spend = usdt_amount * 0.999  # 99.9% для учета комиссий
-        
-        # Округляем до 2 знаков после запятой для USDT
+        usdt_to_spend = usdt_amount * 0.999
         usdt_to_spend = round(usdt_to_spend, 2)
-            
-        log(f"🔢 РАСЧЕТ ПОКУПКИ: USDT={usdt_amount:.2f}, К трате={usdt_to_spend:.2f}, Цена={current_price:.4f}", "CALC")
-        
-        if usdt_to_spend < 10:  # минимум $10
+        log(f"🔢 РАСЧЕТ ПОКУПКИ: USDT={usdt_amount:.2f}, К трате={usdt_to_spend:.2f}", "CALC")
+        if usdt_to_spend < 10:
             log(f"❌ Сумма для покупки слишком мала: {usdt_to_spend:.2f} USDT (минимум $10)", "WARN")
             return False
-        
         try:
-            # Используем quoteOrderQty - точную сумму USDT для покупки
-            usdt_str = '{:.2f}'.format(usdt_to_spend)
-            
-            log(f"📤 ОТПРАВКА ОРДЕРА НА ПОКУПКУ: {self.base_asset} за {usdt_str} USDT (одной транзакцией)", "ORDER")
-            order = self.client.order_market_buy(
-                symbol=self.symbol, 
-                quoteOrderQty=usdt_str  # Указываем точную сумму USDT
+            price = self.get_limit_price(interval=limit_interval)
+            price_str = '{:.2f}'.format(price)
+            qty = usdt_to_spend / price if price > 0 else 0
+            qty = round_step(qty, step)
+            precision = 0
+            step_str = str(step)
+            if '.' in step_str:
+                precision = len(step_str.split('.')[-1])
+            qty_str = '{:.{}f}'.format(qty, precision)
+            log(f"📤 ОТПРАВКА ЛИМИТНОГО ОРДЕРА НА ПОКУПКУ: {qty_str} {self.base_asset} по цене {price_str}", "ORDER")
+            order = self.client.order_limit_buy(
+                symbol=self.symbol,
+                quantity=qty_str,
+                price=price_str,
+                timeInForce='FOK'
             )
-            
-            # Подробная информация об ордере
-            if 'fills' in order and order['fills']:
-                total_cost = sum(float(fill['price']) * float(fill['qty']) for fill in order['fills'])
-                qty = float(order['executedQty'])
-                avg_price = total_cost / qty if qty > 0 else 0
-                log(f"✅ ПОКУПКА ВЫПОЛНЕНА: {qty} {self.base_asset} за {total_cost:.2f} USDT (средняя цена: {avg_price:.4f})", "TRADE")
-            else:
-                log(f"✅ ПОКУПКА ВЫПОЛНЕНА: {usdt_str} USDT -> {self.base_asset}", "TRADE")
-            
-            self.last_switch_time = time.time()
-            return True
-        except BinanceAPIException as e:
+            order_id = order['orderId']
+            start_time = time.time()
+            while True:
+                status = self.client.get_order(symbol=self.symbol, orderId=order_id)
+                if status['status'] == 'FILLED':
+                    log(f"✅ ПОКУПКА ВЫПОЛНЕНА: {qty_str} {self.base_asset} по цене {price_str}", "TRADE")
+                    self.last_switch_time = time.time()
+                    return True
+                if time.time() - start_time > timeout:
+                    self.client.cancel_order(symbol=self.symbol, orderId=order_id)
+                    log(f"❌ ОРДЕР НЕ ИСПОЛНЕН ЗА {timeout} сек, отменен", "WARN")
+                    return False
+                time.sleep(2)
+        except Exception as e:
+            log(f"❌ ОШИБКА ПОКУПКИ (лимит): {e}", "ERROR")
+            return False
             log(f"❌ ОШИБКА ПОКУПКИ: {e}", "ERROR")
             return False
         except Exception as e:
             log(f"❌ ОШИБКА ПОКУПКИ: {e}", "ERROR")
             return False
+
+    def get_limit_price(self, interval: str = '1m', lookback: int = 2) -> float:
+        """Получить цену для лимитного ордера с низкого таймфрейма (close последней свечи)"""
+        try:
+            klines = self.client.get_klines(symbol=self.symbol, interval=interval, limit=lookback)
+            return float(klines[-1][4])
+        except Exception as e:
+            log(f"Ошибка получения лимитной цены: {e}", "ERROR")
+            return 0.0
 
 # ========== Инициализация конфигурации ==========
 env_config = EnvironmentConfig()
@@ -744,7 +741,11 @@ env_config.log_configuration_status()
 API_KEY = env_config.api_key
 API_SECRET = env_config.api_secret
 SYMBOL = env_config.symbol
-INTERVAL = "30m"
+# Для простой MA стратегии используем основной таймфрейм
+INTERVAL = env_config.main_interval
+ENTRY_INTERVAL = env_config.entry_interval
+MAIN_INTERVAL = env_config.main_interval
+TREND_INTERVAL = env_config.trend_interval
 MA_SHORT = env_config.ma_short
 MA_LONG = env_config.ma_long
 CHECK_INTERVAL = env_config.check_interval
@@ -1056,7 +1057,7 @@ def trading_loop():
             
             # Получаем данные
             log("📊 Получение рыночных данных...", "DATA")
-            prices = get_closes(SYMBOL, INTERVAL, limit=max(MA_LONG * 3, 100))
+            prices = get_closes(SYMBOL, MAIN_INTERVAL, limit=max(MA_LONG * 3, 100))
             price = prices[-1]
             usdt_bal, base_bal = get_balances()
             
@@ -1066,11 +1067,11 @@ def trading_loop():
                 log("📊 Получение данных для мульти-таймфреймового анализа...", "DATA")
                 try:
                     data_multi_tf = {
-                        "30m": get_klines_data(SYMBOL, "30m", 100),  # Для обратной совместимости
-                        "1h": get_klines_data(SYMBOL, "1h", 100),
-                        "4h": get_klines_data(SYMBOL, "4h", 100)
+                        ENTRY_INTERVAL: get_klines_data(SYMBOL, ENTRY_INTERVAL, 100),
+                        MAIN_INTERVAL: get_klines_data(SYMBOL, MAIN_INTERVAL, 100),
+                        TREND_INTERVAL: get_klines_data(SYMBOL, TREND_INTERVAL, 100)
                     }
-                    log(f"📊 Получено данных по таймфреймам: 1h ({len(data_multi_tf['1h']['close'])}) - основной, 4h ({len(data_multi_tf['4h']['close'])}) - тренд и волатильность", "DATA")
+                    log(f"📊 Получено данных по таймфреймам: {MAIN_INTERVAL} ({len(data_multi_tf[MAIN_INTERVAL]['close'])}) - основной, {TREND_INTERVAL} ({len(data_multi_tf[TREND_INTERVAL]['close'])}) - тренд/волатильность", "DATA")
                 except Exception as e:
                     log(f"⚠️ Ошибка получения мульти-таймфреймовых данных: {e}", "ERROR")
             
@@ -1111,9 +1112,9 @@ def trading_loop():
                 log("📊 Анализ данных по MA_RSI_ATR стратегии...", "STRATEGY")
                 
                 try:
-                    if all(len(data_multi_tf.get(tf, {}).get('close', [])) > 25 for tf in ['30m', '1h', '4h']):
+                    if all(len(data_multi_tf.get(tf, {}).get('close', [])) > 25 for tf in [ENTRY_INTERVAL, MAIN_INTERVAL, TREND_INTERVAL]):
                         # Получаем анализ от нашей индикаторной системы
-                        analysis = indicator_strategy.analyze(data_multi_tf['30m'], data_multi_tf['1h'], data_multi_tf['4h'])
+                        analysis = indicator_strategy.analyze(data_multi_tf[ENTRY_INTERVAL], data_multi_tf[MAIN_INTERVAL], data_multi_tf[TREND_INTERVAL])
                         
                         # Сохраняем результаты анализа в статус
                         should_hold_base = analysis["should_hold_base"]
@@ -1124,7 +1125,7 @@ def trading_loop():
                             asset_switcher.order_sent = False
                         
                         # Подробный лог индикаторов
-                        log(f"📈 ИНДИКАТОРЫ: 1h сигнал={analysis['1h']['signal']}, 4h RSI={analysis['4h']['rsi']:.1f}, ATR={analysis['4h']['atr_percent']:.2f}%, 4h тренд={analysis['4h']['trend']}", "INDICATORS")
+                        log(f"📈 ИНДИКАТОРЫ: 1h сигнал={analysis['1h']['signal']}, 4h RSI={analysis['4h']['rsi']:.1f}, ATR={analysis['4h']['atr_percent']:.2f}%, 4h тренд={analysis['4h']['trend']}, 30m bb_entry={analysis['30m']['bb_entry']}", "INDICATORS")
                         log(f"🎯 РЕШЕНИЕ: {market_state} → Должны держать {should_hold_asset}", "STRATEGY")
                         
                         # Сохраняем значения индикаторов в статусе бота
@@ -1133,9 +1134,8 @@ def trading_loop():
                             "should_hold": should_hold_asset,
                             "indicators": {
                                 "30m": {
-                                    "signal": analysis['30m']['signal'],
-                                    "ma7": analysis['30m']['ma7'],
-                                    "ma25": analysis['30m']['ma25'],
+                                    "bb_entry": analysis['30m']['bb_entry'],
+                                    "close": analysis['30m']['close'],
                                 },
                                 "1h": {
                                     "rsi": analysis['1h']['rsi'],
@@ -1153,6 +1153,12 @@ def trading_loop():
                         # Если рынок в состоянии флета, не торгуем
                         if market_state == "flet":
                             log(f"🔇 ФЛЕТ: Рынок в боковике, торговля приостановлена", "FILTER")
+                            time.sleep(CHECK_INTERVAL)
+                            continue
+
+                        # Дополнительный фильтр входа: покупаем только если bb_entry True на 30m при сигнале buy
+                        if market_state == "buy" and not analysis['30m']['bb_entry']:
+                            log("⏳ BUY сигнал, но цена не в нижней части BB на 30m → ждем лучший вход", "FILTER")
                             time.sleep(CHECK_INTERVAL)
                             continue
                         
@@ -1603,4 +1609,3 @@ if __name__ == "__main__":
     
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
-    
