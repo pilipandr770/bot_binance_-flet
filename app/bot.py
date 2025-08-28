@@ -1,71 +1,67 @@
 # bot.py - Простой спот-бот для переключения между активами по комплексной стратегии
 # Поддерживает стратегии:
-# 1. SIMPLE_MA: MA7 > MA25 = держим коин, MA7 < MA25 = держим USDT
-# 2. MA_RSI_ATR: Мульти-таймфреймовый анализ с использованием MA, RSI и ATR
 import os
 import json
 import time
 import math
 import threading
 from datetime import datetime, timezone
-from typing import Tuple, Optional, Dict, Any, List
-from flask import Flask, jsonify
+from typing import Any, Dict, Optional, Tuple, List
+
 from dotenv import load_dotenv
+from flask import Flask, jsonify
 from binance.client import Client
-from binance.enums import *
+from binance.enums import *  # noqa
 from binance.exceptions import BinanceAPIException, BinanceOrderException
 
-# Импорт индикаторов (если установлены)
+# Импорт индикаторов
 try:
-    import pandas as pd
-    import numpy as np
-    import ta
+    import pandas as pd  # noqa
+    import numpy as np  # noqa
+    import ta  # noqa
 except ImportError:
     pass
 
-# ========== Утилиты логов ==========
 def log(msg: str, level: str = "INFO"):
     ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] [{level}] {msg}", flush=True)
 
 try:
-    # Импортируем нашу индикаторную систему
-    from indicators import IndicatorBasedStrategy
+    from indicators import IndicatorBasedStrategy  # noqa
+    from fok_executor import place_limit_order_fok_with_retries  # noqa
 except ImportError:
-    log("❌ Не удалось импортировать модуль indicators.py, будет использован только базовый метод MA", "WARN")
+    log("❌ Не удалось импортировать indicators/fok_executor", "WARN")
 
-# ========== Управление конфигурацией ==========
 from dataclasses import dataclass
-from typing import List
 
 @dataclass
 class ConfigurationStatus:
     api_keys_present: bool
     api_keys_valid: bool
-    environment_source: str  # "system", "file", "default"
+    environment_source: str
     configuration_issues: List[str]
     safety_checks_passed: bool
 
 @dataclass
 class TradingModeStatus:
-    current_mode: str  # "LIVE"
-    mode_source: str   # откуда взято значение
+    current_mode: str
+    mode_source: str
     blocking_issues: List[str]
     last_mode_change: Optional[datetime]
 
 class EnvironmentConfig:
     """Централизованное управление переменными окружения"""
-    
+
     def __init__(self):
         self.config_status = None
         self.load_environment()
         self.validate_configuration()
-    
+
     def load_environment(self):
         """Загрузка переменных окружения с правильным приоритетом"""
         log("🚀 НАЧАЛО ЗАГРУЗКИ КОНФИГУРАЦИИ", "CONFIG")
         log("=" * 60, "CONFIG")
-        
+
         # Загружаем переменные из .env файла
         current_dir = os.path.dirname(os.path.abspath(__file__))
         env_file_path = os.path.join(current_dir, '.env')
@@ -98,6 +94,14 @@ class EnvironmentConfig:
         self.health_check_interval = self._get_env_with_logging("HEALTH_CHECK_INTERVAL", "300", int)
         self.min_balance_usdt = self._get_env_with_logging("MIN_BALANCE_USDT", "10.0", float)
 
+        # === Параметры FOK ордеров ===
+        self.fok_depth_limit = self._get_env_with_logging("FOK_DEPTH_LIMIT", "50", int)
+        self.fok_slippage_bps = self._get_env_with_logging("FOK_SLIPPAGE_BPS", "5.0", float)
+        self.fok_max_retries = self._get_env_with_logging("FOK_MAX_RETRIES", "5", int)
+        self.fok_retry_sleep = self._get_env_with_logging("FOK_RETRY_SLEEP", "1.2", float)
+        self.fok_per_attempt_drift_bps = self._get_env_with_logging("FOK_PER_ATTEMPT_DRIFT_BPS", "2.0", float)
+        self.fok_max_total_drift_bps = self._get_env_with_logging("FOK_MAX_TOTAL_DRIFT_BPS", "20.0", float)
+
         # === Staking настройки ===
         self.enable_staking = self._get_env_with_logging("ENABLE_STAKING", "false").lower() == "true"
         self.stake_percent = self._get_env_with_logging("STAKE_PERCENT", "0.8", float)
@@ -107,16 +111,11 @@ class EnvironmentConfig:
 
         log("✅ КОНФИГУРАЦИЯ ЗАГРУЖЕНА УСПЕШНО", "CONFIG")
         log("=" * 60, "CONFIG")
-    
+
     def _get_env_with_logging(self, name: str, default: str, convert_func=None):
         """Получение переменной окружения с подробным логированием"""
-        # Проверяем системные переменные окружения
         system_value = os.environ.get(name)
-        
-        # Получаем значение из os.getenv (уже загружено через load_dotenv)
         dotenv_value = os.getenv(name)
-        
-        # Определяем источник и финальное значение
         if system_value is not None:
             final_value = system_value
             source = "системные переменные окружения"
@@ -126,8 +125,6 @@ class EnvironmentConfig:
         else:
             final_value = default
             source = "значение по умолчанию"
-        
-        # Применяем конвертацию если нужно
         if convert_func:
             try:
                 converted_value = convert_func(final_value)
@@ -141,24 +138,18 @@ class EnvironmentConfig:
         else:
             self._log_env_var(name, final_value, default, source)
             return final_value
-    
+
     def _log_env_var(self, name: str, value: Any, default: Any, source: str = "unknown") -> None:
-        """Логирование переменной окружения с источником"""
         if value == default:
             log(f"🔧 ENV {name}={value} (источник: значение по умолчанию)", "CONFIG")
         else:
             log(f"🔧 ENV {name}={value} (источник: {source})", "CONFIG")
-    
+
     def validate_configuration(self):
-        """Валидация критических настроек"""
         issues = []
-        
-        # Проверяем API ключи
         api_keys_present = bool(self.api_key and self.api_secret)
         if not api_keys_present:
             issues.append("API ключи не настроены")
-        
-        # Логируем критически важную информацию о режиме торговли
         log("=" * 60, "CONFIG")
         log("🔴 РЕЖИМ ТОРГОВЛИ: РЕАЛЬНЫЙ", "CONFIG")
         log("⚠️  ВНИМАНИЕ: Будут выполняться РЕАЛЬНЫЕ торговые операции!", "CONFIG")
@@ -167,22 +158,25 @@ class EnvironmentConfig:
             log("❌ КРИТИЧЕСКАЯ ОШИБКА: API ключи не настроены!", "ERROR")
             issues.append("Для работы бота необходимы API ключи")
         log("=" * 60, "CONFIG")
-        
-        # Создаем статус конфигурации
         self.config_status = ConfigurationStatus(
             api_keys_present=api_keys_present,
-            api_keys_valid=False,  # Будет проверено позже
-            environment_source="mixed",  # Смешанный источник
+            api_keys_valid=False,
+            environment_source="mixed",
             configuration_issues=issues,
             safety_checks_passed=len(issues) == 0
         )
-    
+
     def get_trading_mode(self) -> str:
-        """Определение режима торговли с диагностикой"""
         return "LIVE"
-    
+
     def log_configuration_status(self):
-        """Подробное логирование текущей конфигурации"""
+        if self.config_status:
+            log("📊 СТАТУС КОНФИГУРАЦИИ:", "CONFIG")
+            log(f"   Режим торговли: РЕАЛЬНЫЙ", "CONFIG")
+            log(f"   API ключи присутствуют: {'✅' if self.config_status.api_keys_present else '❌'}", "CONFIG")
+            log(f"   Проверки безопасности: {'✅' if self.config_status.safety_checks_passed else '❌'}", "CONFIG")
+            if self.config_status.configuration_issues:
+                log(f"   Проблемы: {', '.join(self.config_status.configuration_issues)}", "CONFIG")
         if self.config_status:
             log("📊 СТАТУС КОНФИГУРАЦИИ:", "CONFIG")
             log(f"   Режим торговли: РЕАЛЬНЫЙ", "CONFIG")
@@ -630,96 +624,71 @@ class AssetSwitcher:
             log(f"Ошибка переключения {from_asset} -> {to_asset}: {e}", "ERROR")
             return False
     
-    def _sell_base_for_usdt(self, base_qty: float, step: float, limit_interval: str = '1m', timeout: int = 30) -> bool:
-        """Продать весь базовый актив за USDT лимитным ордером"""
+    def _sell_base_for_usdt(self, base_qty: float, step: float, *_args, **_kwargs) -> bool:
+        """Продать весь базовый актив за USDT через FOK executor."""
         if not self.client:
-            log(f"❌ Нет подключения к Binance API", "ERROR")
+            log("❌ Нет подключения к Binance API", "ERROR")
             return False
         qty = round_step(base_qty * 0.999, step)
-        log(f"🔢 РАСЧЕТ ПРОДАЖИ: Исходное количество={base_qty:.6f}, После округления={qty} (step={step})", "CALC")
         if qty <= 0:
             log(f"❌ Количество для продажи слишком мало: {qty}", "WARN")
             return False
+        log(f"🔢 ПРОДАЖА FOK: исходное={base_qty:.6f}, к продаже={qty}", "CALC")
         try:
-            precision = 0
-            step_str = str(step)
-            if '.' in step_str:
-                precision = len(step_str.split('.')[-1])
-            qty_str = '{:.{}f}'.format(qty, precision)
-            price = self.get_limit_price(interval=limit_interval)
-            price_str = '{:.2f}'.format(price)
-            log(f"📤 ОТПРАВКА ЛИМИТНОГО ОРДЕРА НА ПРОДАЖУ: {qty_str} {self.base_asset} по цене {price_str}", "ORDER")
-            order = self.client.order_limit_sell(
+            order = place_limit_order_fok_with_retries(
+                client=self.client,
                 symbol=self.symbol,
-                quantity=qty_str,
-                price=price_str,
-                timeInForce='FOK'  # Исполнить полностью или отменить
+                side=SIDE_SELL,
+                quantity=qty,
+                depth_limit=env_config.fok_depth_limit,
+                slippage_bps=env_config.fok_slippage_bps,
+                max_retries=env_config.fok_max_retries,
+                retry_sleep=env_config.fok_retry_sleep,
+                per_attempt_drift_bps=env_config.fok_per_attempt_drift_bps,
+                max_total_drift_bps=env_config.fok_max_total_drift_bps,
             )
-            order_id = order['orderId']
-            start_time = time.time()
-            while True:
-                status = self.client.get_order(symbol=self.symbol, orderId=order_id)
-                if status['status'] == 'FILLED':
-                    log(f"✅ ПРОДАЖА ВЫПОЛНЕНА: {qty_str} {self.base_asset} по цене {price_str}", "TRADE")
-                    self.last_switch_time = time.time()
-                    return True
-                if time.time() - start_time > timeout:
-                    self.client.cancel_order(symbol=self.symbol, orderId=order_id)
-                    log(f"❌ ОРДЕР НЕ ИСПОЛНЕН ЗА {timeout} сек, отменен", "WARN")
-                    return False
-                time.sleep(2)
+            log(f"✅ ПРОДАЖА FOK ВЫПОЛНЕНА: qty={qty} (orderId={order.get('orderId')})", "TRADE")
+            self.last_switch_time = time.time()
+            return True
         except Exception as e:
-            log(f"❌ ОШИБКА ПРОДАЖИ (лимит): {e}", "ERROR")
+            log(f"❌ ОШИБКА ПРОДАЖИ FOK: {e}", "ERROR")
             return False
     
-    def _buy_base_with_usdt(self, usdt_amount: float, current_price: float, step: float, limit_interval: str = '1m', timeout: int = 30) -> bool:
-        """Купить базовый актив за весь USDT лимитным ордером"""
+    def _buy_base_with_usdt(self, usdt_amount: float, current_price: float, step: float, *_args, **_kwargs) -> bool:
+        """Покупка через FOK executor на весь доступный USDT (минус комиссия)."""
         if not self.client:
-            log(f"❌ Нет подключения к Binance API", "ERROR")
+            log("❌ Нет подключения к Binance API", "ERROR")
             return False
-        usdt_to_spend = usdt_amount * 0.999
-        usdt_to_spend = round(usdt_to_spend, 2)
-        log(f"🔢 РАСЧЕТ ПОКУПКИ: USDT={usdt_amount:.2f}, К трате={usdt_to_spend:.2f}", "CALC")
+        usdt_to_spend = round(usdt_amount * 0.999, 2)
+        log(f"🔢 ПОКУПКА FOK: доступно={usdt_amount:.2f}, к трате={usdt_to_spend:.2f}", "CALC")
         if usdt_to_spend < 10:
-            log(f"❌ Сумма для покупки слишком мала: {usdt_to_spend:.2f} USDT (минимум $10)", "WARN")
+            log(f"❌ Сумма для покупки слишком мала: {usdt_to_spend:.2f} USDT (min 10)", "WARN")
             return False
         try:
-            price = self.get_limit_price(interval=limit_interval)
-            price_str = '{:.2f}'.format(price)
-            qty = usdt_to_spend / price if price > 0 else 0
-            qty = round_step(qty, step)
-            precision = 0
-            step_str = str(step)
-            if '.' in step_str:
-                precision = len(step_str.split('.')[-1])
-            qty_str = '{:.{}f}'.format(qty, precision)
-            log(f"📤 ОТПРАВКА ЛИМИТНОГО ОРДЕРА НА ПОКУПКУ: {qty_str} {self.base_asset} по цене {price_str}", "ORDER")
-            order = self.client.order_limit_buy(
+            # Оценка количества по текущей цене тикера
+            ticker = self.client.get_symbol_ticker(symbol=self.symbol)
+            mid_price = float(ticker['price'])
+            est_qty = round_step(usdt_to_spend / mid_price, step)
+            if est_qty <= 0:
+                log("❌ Расчетное количество для покупки слишком мало", "WARN")
+                return False
+            order = place_limit_order_fok_with_retries(
+                client=self.client,
                 symbol=self.symbol,
-                quantity=qty_str,
-                price=price_str,
-                timeInForce='FOK'
+                side=SIDE_BUY,
+                quantity=est_qty,
+                depth_limit=env_config.fok_depth_limit,
+                slippage_bps=env_config.fok_slippage_bps,
+                max_retries=env_config.fok_max_retries,
+                retry_sleep=env_config.fok_retry_sleep,
+                per_attempt_drift_bps=env_config.fok_per_attempt_drift_bps,
+                max_total_drift_bps=env_config.fok_max_total_drift_bps,
             )
-            order_id = order['orderId']
-            start_time = time.time()
-            while True:
-                status = self.client.get_order(symbol=self.symbol, orderId=order_id)
-                if status['status'] == 'FILLED':
-                    log(f"✅ ПОКУПКА ВЫПОЛНЕНА: {qty_str} {self.base_asset} по цене {price_str}", "TRADE")
-                    self.last_switch_time = time.time()
-                    return True
-                if time.time() - start_time > timeout:
-                    self.client.cancel_order(symbol=self.symbol, orderId=order_id)
-                    log(f"❌ ОРДЕР НЕ ИСПОЛНЕН ЗА {timeout} сек, отменен", "WARN")
-                    return False
-                time.sleep(2)
+            log(f"✅ ПОКУПКА FOK ВЫПОЛНЕНА: qty={est_qty} (orderId={order.get('orderId')})", "TRADE")
+            self.last_switch_time = time.time()
+            return True
         except Exception as e:
-            log(f"❌ ОШИБКА ПОКУПКИ (лимит): {e}", "ERROR")
-            return False
-            log(f"❌ ОШИБКА ПОКУПКИ: {e}", "ERROR")
-            return False
-        except Exception as e:
-            log(f"❌ ОШИБКА ПОКУПКИ: {e}", "ERROR")
+            log(f"❌ ОШИБКА ПОКУПКИ FOK: {e}", "ERROR")
             return False
 
     def get_limit_price(self, interval: str = '1m', lookback: int = 2) -> float:
@@ -749,6 +718,12 @@ TREND_INTERVAL = env_config.trend_interval
 MA_SHORT = env_config.ma_short
 MA_LONG = env_config.ma_long
 CHECK_INTERVAL = env_config.check_interval
+FOK_DEPTH_LIMIT = env_config.fok_depth_limit
+FOK_SLIPPAGE_BPS = env_config.fok_slippage_bps
+FOK_MAX_RETRIES = env_config.fok_max_retries
+FOK_RETRY_SLEEP = env_config.fok_retry_sleep
+FOK_PER_ATTEMPT_DRIFT_BPS = env_config.fok_per_attempt_drift_bps
+FOK_MAX_TOTAL_DRIFT_BPS = env_config.fok_max_total_drift_bps
 STATE_PATH = env_config.state_path
 MA_SPREAD_BPS = env_config.ma_spread_bps
 MAX_RETRIES = env_config.max_retries
@@ -978,8 +953,37 @@ def ma(arr, period):
 def get_balances() -> Tuple[float, float]:
     def _get_balances():
         base = SYMBOL[:-4] if SYMBOL.endswith("USDT") else SYMBOL.split("USDT")[0]
+        
+        # Получаем обычный баланс USDT
         usdt = float(client.get_asset_balance("USDT")["free"])
+        
+        # Получаем все балансы, включая LD токены (Simple Earn)
+        all_balances = client.get_account()['balances']
+        
+        # Ищем и учитываем стейкинг токены (LD*)
+        for token in all_balances:
+            if token['asset'] == 'LDUSDT' and float(token['free']) > 0:
+                ld_usdt = float(token['free'])
+                usdt += ld_usdt
+                log(f"💰 Найдено LDUSDT (стейкинг): {ld_usdt:.6f}", "BALANCE")
+            
+            # Для LDUSDC - конвертируем примерно 1:1 в USDT
+            if token['asset'] == 'LDUSDC' and float(token['free']) > 0:
+                ld_usdc = float(token['free'])
+                usdt += ld_usdc  # примерно 1:1 с USDT
+                log(f"💰 Найдено LDUSDC (стейкинг): {ld_usdc:.6f} (~{ld_usdc:.6f} USDT)", "BALANCE")
+                
+        # Получаем обычный баланс базовой монеты
         base_bal = float(client.get_asset_balance(base)["free"])
+        
+        # Проверяем LD версию базового актива
+        ld_base_key = f"LD{base}"
+        for token in all_balances:
+            if token['asset'] == ld_base_key and float(token['free']) > 0:
+                ld_base_bal = float(token['free'])
+                base_bal += ld_base_bal
+                log(f"💰 Найдено {ld_base_key} (стейкинг): {ld_base_bal:.6f}", "BALANCE")
+                
         return usdt, base_bal
     
     return retry_on_error(_get_balances)
