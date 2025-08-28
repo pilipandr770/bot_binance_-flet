@@ -76,6 +76,14 @@ class IndicatorBasedStrategy:
         df_1h['ma7'] = df_1h['close'].rolling(7).mean()
         df_1h['ma25'] = df_1h['close'].rolling(25).mean()
         
+        # Рассчитываем RSI и ATR для 1h таймфрейма
+        rsi_1h = calculate_rsi(df_1h).iloc[-1]
+        atr_1h = calculate_atr(df_1h).iloc[-1]
+        price_1h = df_1h['close'].iloc[-1]
+        
+        # Рассчитываем ATR в процентах от цены для 1h
+        atr_percent_1h = atr_1h / price_1h * 100
+        
         signal_1h = "none"
         if df_1h['ma7'].iloc[-1] > df_1h['ma25'].iloc[-1]:
             signal_1h = "long"
@@ -111,7 +119,10 @@ class IndicatorBasedStrategy:
                 "ma7": df_1h['ma7'].iloc[-1],
                 "ma25": df_1h['ma25'].iloc[-1],
                 "signal": signal_1h,
-                "price": df_1h['close'].iloc[-1]
+                "price": df_1h['close'].iloc[-1],
+                "rsi": rsi_1h,
+                "atr": atr_1h,
+                "atr_percent": atr_percent_1h
             },
             "4h": {
                 "ma7": ma7_4h,
